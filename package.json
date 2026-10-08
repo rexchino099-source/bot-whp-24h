@@ -1,13 +1,15 @@
 {
-  "name": "whatsapp-bot-multi-247",
-  "version": "2.0.0",
-  "description": "Bot de WhatsApp Multicuenta 24/7 con Panel Web y Comandos",
+  "name": "slim-whatsapp-bot",
+  "version": "4.9.0",
+  "description": "Slim WhatsApp Bot 24/7 - Multi-session Web Panel",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.13",
+    "axios": "^1.7.2",
+    "cors": "^2.8.5",
     "express": "^4.19.2",
     "pino": "^9.0.0",
     "qrcode": "^1.5.3"
