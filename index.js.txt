@@ -1,0 +1,322 @@
+const { 
+    default: makeWASocket, 
+    useMultiFileAuthState, 
+    DisconnectReason,
+    delay
+} = require('@whiskeysockets/baileys');
+const pino = require('pino');
+const express = require('express');
+const QRCode = require('qrcode');
+const fs = require('fs');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+
+const activeSockets = {};
+const currentQRs = {};
+
+// ==========================================
+// 🤖 DICCIONARIO GENERAL DE COMANDOS (Compartido)
+// ==========================================
+async function handleCommands(sock, msg) {
+    if (!msg.message || msg.key.fromMe) return;
+
+    const messageType = Object.keys(msg.message)[0];
+    const text = messageType === 'conversation' ? msg.message.conversation :
+                 messageType === 'extendedTextMessage' ? msg.message.extendedTextMessage.text : '';
+
+    const prefix = '.';
+    if (!text.startsWith(prefix)) return;
+
+    const args = text.slice(prefix.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+    const from = msg.key.remoteJid;
+
+    switch (command) {
+        case 'menu':
+        case 'help':
+            const menuText = 
+`✨ *MENÚ PRINCIPAL DEL BOT* ✨
+
+*📌 COMANDOS BÁSICOS:*
+• *.menu* - Muestra este menú de ayuda
+• *.ping* - Verifica la velocidad del bot
+• *.estado* - Muestra si el servidor está activo 24/7
+• *.info* - Información sobre el bot
+• *.creador* - Contacto del creador del bot
+• *.reglas* - Normas de uso del bot
+
+*🎮 COMANDOS DE ENTRETENIMIENTO:*
+• *.dado* - Tira un dado aleatorio (1-6)
+• *.moneda* - Lanza una moneda (Cara o Cruz)
+• *.azar [opcion1] [opcion2]* - Escoge al azar entre opciones
+
+*💬 COMANDOS DE GRUPO / CHAT:*
+• *.id* - Muestra tu ID o el ID del grupo
+• *.hora* - Muestra la hora del servidor
+
+_Todos los bots conectados responden a estos comandos._`;
+            await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+            break;
+
+        case 'ping':
+            const start = Date.now();
+            await sock.sendMessage(from, { text: '🏓 Calculando latencia...' }, { quoted: msg });
+            const end = Date.now();
+            await sock.sendMessage(from, { text: `🏓 *¡Pong!* Respuesta en *${end - start} ms*.` });
+            break;
+
+        case 'estado':
+        case 'status':
+            await sock.sendMessage(from, { 
+                text: `🟢 *Estado:* Online 24/7 en la nube.\n⚡ *Servidor:* Operativo sin interrupciones.` 
+            }, { quoted: msg });
+            break;
+
+        case 'info':
+            await sock.sendMessage(from, { 
+                text: `🤖 *Bot Multicuenta WhatsApp*\n\nEste bot funciona 24/7 en un servidor nube centralizado. Soporta múltiples números sincronizados.` 
+            }, { quoted: msg });
+            break;
+
+        case 'creador':
+        case 'owner':
+            await sock.sendMessage(from, { 
+                text: `👑 *Creador:* Proyecto Bot WhatsApp 24/7` 
+            }, { quoted: msg });
+            break;
+
+        case 'reglas':
+            await sock.sendMessage(from, { 
+                text: `📜 *REGLAS DE USO:*
+1. No hacer spam de comandos.
+2. No usar el bot para ataques ni acoso.
+3. El mal uso resultará en el bloqueo de tu número.` 
+            }, { quoted: msg });
+            break;
+
+        case 'dado':
+            const dado = Math.floor(Math.random() * 6) + 1;
+            await sock.sendMessage(from, { text: `🎲 Lanzaste el dado y salió: *${dado}*` }, { quoted: msg });
+            break;
+
+        case 'moneda':
+            const opciones = ['Cara 🪙', 'Cruz 🪙'];
+            const resultado = opciones[Math.floor(Math.random() * opciones.length)];
+            await sock.sendMessage(from, { text: `🪙 Lanzaste la moneda y cayó: *${resultado}*` }, { quoted: msg });
+            break;
+
+        case 'azar':
+            if (args.length < 2) {
+                await sock.sendMessage(from, { text: '⚠️ Escribe al menos 2 opciones. Ejemplo: `.azar pizza tacos`' }, { quoted: msg });
+            } else {
+                const eleccion = args[Math.floor(Math.random() * args.length)];
+                await sock.sendMessage(from, { text: `🎯 De las opciones elegí: *${eleccion}*` }, { quoted: msg });
+            }
+            break;
+
+        case 'hora':
+            const horaActual = new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' });
+            await sock.sendMessage(from, { text: `🕒 Hora del servidor: *${horaActual}*` }, { quoted: msg });
+            break;
+
+        case 'id':
+            await sock.sendMessage(from, { text: `🆔 Tu ID / Chat ID:\n\`\`\`${from}\`\`\`` }, { quoted: msg });
+            break;
+
+        default:
+            break;
+    }
+}
+
+// ==========================================
+// 🚀 INICIALIZACIÓN DE BOTS Y SESIONES
+// ==========================================
+async function startBot(botId, phoneNumber = null) {
+    const authFolder = `auth_info_${botId}`;
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+
+    const sock = makeWASocket({
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: false,
+        auth: state,
+        browser: ['Ubuntu', 'Chrome', '20.0.04']
+    });
+
+    activeSockets[botId] = sock;
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            currentQRs[botId] = await QRCode.toDataURL(qr);
+        }
+
+        if (connection === 'open') {
+            console.log(`✅ Bot [${botId}] conectado exitosamente.`);
+            delete currentQRs[botId];
+        }
+
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
+            console.log(`⚠️ Conexión de [${botId}] cerrada. Reconectando:`, shouldReconnect);
+            if (shouldReconnect) {
+                startBot(botId);
+            }
+        }
+    });
+
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        await handleCommands(sock, msg);
+    });
+
+    if (phoneNumber && !sock.authState.creds.registered) {
+        await delay(3000);
+        const cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
+        const code = await sock.requestPairingCode(cleanedNumber);
+        return code;
+    }
+
+    return null;
+}
+
+// Cargar automáticamente sesiones guardadas al iniciar el servidor
+fs.readdirSync('./').forEach(file => {
+    if (file.startsWith('auth_info_')) {
+        const botId = file.replace('auth_info_', '');
+        console.log(`Cargando sesión guardada para: ${botId}`);
+        startBot(botId);
+    }
+});
+
+// ==========================================
+// 🌐 PANEL WEB SLIM DE VINCULACIÓN (HTML/JS)
+// ==========================================
+app.get('/', (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Panel Vincular Bot WhatsApp</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b141a; color: #e9edef; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+            .card { background: #111b21; padding: 25px; border-radius: 12px; width: 100%; max-width: 400px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: center; border: 1px solid #222d34; }
+            h2 { color: #00a884; margin-bottom: 20px; font-size: 1.4rem; }
+            label { display: block; text-align: left; margin: 10px 0 5px; font-size: 0.85rem; color: #8696a0; }
+            select, input { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #2a3942; background: #111b21; color: #fff; box-sizing: border-box; outline: none; }
+            button { width: 100%; padding: 12px; background: #00a884; color: #111b21; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; transition: 0.2s; }
+            button:hover { background: #029071; }
+            .code-box { font-size: 2rem; font-weight: bold; letter-spacing: 4px; color: #00a884; background: #202c33; padding: 15px; border-radius: 8px; margin-top: 15px; border: 1px dashed #00a884; }
+            #qr-container { margin-top: 15px; }
+            #qr-container img { width: 220px; height: 220px; border-radius: 8px; background: white; padding: 10px; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>Vincular Bot WhatsApp</h2>
+            
+            <label>Selecciona la sesión:</label>
+            <select id="botId">
+                <option value="bot1">Bot 1</option>
+                <option value="bot2">Bot 2</option>
+                <option value="bot3">Bot 3</option>
+                <option value="bot4">Bot 4</option>
+            </select>
+
+            <label>Número de teléfono (código de país + número):</label>
+            <input type="text" id="phone" placeholder="Ej: 5215512345678">
+
+            <button onclick="requestPairingCode()">Obtener Código de 8 Dígitos</button>
+            <button onclick="requestQR()" style="margin-top: 10px; background: #202c33; color: #e9edef;">Generar Código QR</button>
+
+            <div id="result"></div>
+        </div>
+
+        <script>
+            async function requestPairingCode() {
+                const botId = document.getElementById('botId').value;
+                const phone = document.getElementById('phone').value;
+                const resultDiv = document.getElementById('result');
+
+                if(!phone) { alert('Por favor ingresa un número de teléfono válido.'); return; }
+
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Generando código...</p>';
+
+                const res = await fetch('/pair-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ botId, phone })
+                });
+                const data = await res.json();
+
+                if(data.code) {
+                    resultDiv.innerHTML = '<p style="margin-top:15px; color:#8696a0;">Ingresa este código en tu WhatsApp:</p>' +
+                                          '<div class="code-box">' + data.code + '</div>';
+                } else {
+                    resultDiv.innerHTML = '<p style="color:#f15c6d;">Error: ' + (data.error || 'No se pudo generar el código') + '</p>';
+                }
+            }
+
+            async function requestQR() {
+                const botId = document.getElementById('botId').value;
+                const resultDiv = document.getElementById('result');
+
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Cargando QR...</p>';
+                
+                await fetch('/start-qr', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ botId })
+                });
+
+                setTimeout(async () => {
+                    const res = await fetch('/get-qr/' + botId);
+                    const data = await res.json();
+                    if(data.qr) {
+                        resultDiv.innerHTML = '<div id="qr-container"><img src="' + data.qr + '" alt="QR Code"><p style="font-size:0.8rem; color:#8696a0;">Escanea desde WhatsApp > Dispositivos vinculados</p></div>';
+                    } else {
+                        resultDiv.innerHTML = '<p style="color:#8696a0;">Generando QR... vuelve a hacer clic en un momento.</p>';
+                    }
+                }, 3000);
+            }
+        </script>
+    </body>
+    </html>
+    `);
+});
+
+app.post('/pair-code', async (req, res) => {
+    const { botId, phone } = req.body;
+    try {
+        const code = await startBot(botId, phone);
+        res.json({ code });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/start-qr', async (req, res) => {
+    const { botId } = req.body;
+    try {
+        startBot(botId);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/get-qr/:botId', (req, res) => {
+    const qr = currentQRs[req.params.botId];
+    res.json({ qr: qr || null });
+});
+
+app.listen(PORT, () => {
+    console.log(`🌐 Servidor Web activo en el puerto ${PORT}`);
+});
