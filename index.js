@@ -3,7 +3,8 @@ const {
     useMultiFileAuthState, 
     DisconnectReason,
     downloadContentFromMessage,
-    delay
+    delay,
+    Browsers
 } = require('@whiskeysockets/baileys');
 const express = require('express');
 const cors = require('cors');
@@ -118,7 +119,7 @@ async function initBotSocket(botId, forceReset = false) {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'fatal' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        browser: Browsers.macOS("Chrome"), // Navegador oficial aceptado por WhatsApp
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 10000
     });
@@ -555,7 +556,7 @@ async function atenderComandos(sock, from, msg, cmd, texto, esOwnerChat, esGrupo
 }
 
 // ==========================================
-// 🌐 PANEL WEB SLIM ULTRARRÁPIDO Y SÍNCRONO
+// 🌐 PANEL WEB CON CORRECCIÓN DE NÚMEROS
 // ==========================================
 app.get('/', (req, res) => {
     res.send(`
@@ -603,7 +604,7 @@ app.get('/', (req, res) => {
             </select>
 
             <label>Número de teléfono:</label>
-            <input type="text" id="phone" placeholder="Ej México: 52155... | Cuba: 53... (Sin + ni espacios)">
+            <input type="text" id="phone" placeholder="Ej México: 521612... | Cuba: 53... (Sin + ni espacios)">
 
             <button onclick="requestPairingCode()">Obtener Código de 8 Dígitos Real</button>
             <button onclick="requestQR()" style="margin-top: 10px; background: #202c33; color: #e9edef;">Generar Código QR</button>
@@ -715,28 +716,31 @@ app.get('/status', (req, res) => {
     res.json(status);
 });
 
-// ENDPOINT OPTIMIZADO SIN TIMEOUTS
+// ENDPOINT CON FORMATEO AUTOMÁTICO DE NÚMEROS DE MÉXICO
 app.post('/pair-code', async (req, res) => {
     const { botId, phone } = req.body;
     try {
-        const cleanedNumber = phone.replace(/[^0-9]/g, '');
+        let cleanedNumber = phone.replace(/[^0-9]/g, '');
 
         if (!cleanedNumber || cleanedNumber.length < 8) {
             return res.status(400).json({ error: 'Número de teléfono inválido.' });
         }
 
-        let sock = activeSockets[botId];
-
-        // Si el socket no existe o ya estaba registrado, reiniciarlo limpiamente
-        if (!sock || sock.authState?.creds?.registered) {
-            sock = await initBotSocket(botId, true);
-            await delay(3000); // Pequeño delay suficiente para que abra el WebSocket sin causar timeout en Render
+        // Si es número de México y le faltó el '1', agregarlo automáticamente (52 -> 521)
+        if (cleanedNumber.startsWith('52') && !cleanedNumber.startsWith('521') && cleanedNumber.length === 12) {
+            cleanedNumber = '521' + cleanedNumber.slice(2);
         }
 
-        // Petición directa a los servidores oficiales de WhatsApp
+        let sock = activeSockets[botId];
+
+        if (!sock || sock.authState?.creds?.registered) {
+            sock = await initBotSocket(botId, true);
+            await delay(3000);
+        }
+
         const code = await sock.requestPairingCode(cleanedNumber);
         
-        console.log(`🔑 Código real emitido por WhatsApp para ${cleanedNumber}: ${code}`);
+        console.log(`🔑 Código oficial de WhatsApp emitido para ${cleanedNumber}: ${code}`);
         res.json({ code });
     } catch (err) {
         console.error('Error solicitando Pairing Code:', err);
