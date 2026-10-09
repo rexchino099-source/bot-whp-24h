@@ -1,17 +1,18 @@
 {
   "name": "slim-whatsapp-bot",
   "version": "4.9.0",
-  "description": "Slim WhatsApp Bot 24/7 - Multi-session Web Panel",
+  "description": "Slim XIT WhatsApp Bot 24/7",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.13",
-    "axios": "^1.7.2",
+    "@whiskeysockets/baileys": "^6.7.12",
+    "axios": "^1.7.9",
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "pino": "^9.0.0",
-    "qrcode": "^1.5.3"
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1"
   }
 }
