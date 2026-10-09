@@ -92,12 +92,17 @@ async function bajarMedia(msgMedia, tipo) {
     return buffer;
 }
 
-// Estructuras para gestionar múltiples sesiones en la Web
 const activeSockets = {};
 const currentQRs = {};
 
-async function initBotSocket(botId) {
+async function initBotSocket(botId, forceReset = false) {
     const authFolder = `auth_info_${botId}`;
+
+    if (forceReset && fs.existsSync(authFolder)) {
+        console.log(`🧹 Limpiando sesión anterior de ${botId}...`);
+        fs.rmSync(authFolder, { recursive: true, force: true });
+    }
+
     if (!fs.existsSync(authFolder)) {
         fs.mkdirSync(authFolder, { recursive: true });
     }
@@ -136,7 +141,7 @@ async function initBotSocket(botId) {
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const deberiaReconectar = statusCode !== DisconnectReason.loggedOut;
-            console.log(`🔄 Conexión de [${botId}] cerrada. ¿Reconectando?:`, deberiaReconectar);
+            console.log(`🔄 Conexión de [${botId}] cerrada. STATUS: ${statusCode}. ¿Reconectando?:`, deberiaReconectar);
             delete currentQRs[botId];
 
             if (deberiaReconectar) {
@@ -191,7 +196,7 @@ async function initBotSocket(botId) {
     return sock;
 }
 
-// Cargar automáticamente sesiones previamente guardadas
+// Cargar sesiones guardadas válidas
 fs.readdirSync('./').forEach(file => {
     if (file.startsWith('auth_info_')) {
         const botId = file.replace('auth_info_', '');
@@ -545,7 +550,7 @@ async function atenderComandos(sock, from, msg, cmd, texto, esOwnerChat, esGrupo
 }
 
 // ==========================================
-// 🌐 PANEL WEB CON NOMBRE "SLIM WHATSAPP BOT" Y ESTADO DE CASILLAS
+// 🌐 PANEL WEB SLIM CON SOLICITUD REAL
 // ==========================================
 app.get('/', (req, res) => {
     res.send(`
@@ -593,9 +598,9 @@ app.get('/', (req, res) => {
             </select>
 
             <label>Número de teléfono:</label>
-            <input type="text" id="phone" placeholder="Ej: 5215512345678 (Sin + ni espacios)">
+            <input type="text" id="phone" placeholder="Ej México: 52155... | Cuba: 53... (Sin + ni espacios)">
 
-            <button onclick="requestPairingCode()">Obtener Código de 8 Dígitos</button>
+            <button onclick="requestPairingCode()">Obtener Código de 8 Dígitos Real</button>
             <button onclick="requestQR()" style="margin-top: 10px; background: #202c33; color: #e9edef;">Generar Código QR</button>
 
             <div id="result"></div>
@@ -625,11 +630,11 @@ app.get('/', (req, res) => {
                 const resultDiv = document.getElementById('result');
 
                 if(!phone || phone.length < 8) { 
-                    alert('Ingresa tu número de teléfono con código de país.'); 
+                    alert('Ingresa tu número con código de país. Ej: 521... o 53...'); 
                     return; 
                 }
 
-                resultDiv.innerHTML = '<p style="color:#8696a0;">Solicitando código a WhatsApp...</p>';
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Conectando con los servidores de WhatsApp...</p>';
 
                 try {
                     const res = await fetch('/pair-code', {
@@ -643,7 +648,7 @@ app.get('/', (req, res) => {
                         resultDiv.innerHTML = '<p style="margin-top:15px; color:#8696a0;">Ingresa este código en tu WhatsApp:</p>' +
                                               '<div class="code-box">' + data.code + '</div>';
                     } else {
-                        resultDiv.innerHTML = '<p style="color:#f15c6d; margin-top:15px;">Error: ' + (data.error || 'No se pudo obtener el código.') + '</p>';
+                        resultDiv.innerHTML = '<p style="color:#f15c6d; margin-top:15px;">Error: ' + (data.error || 'No se pudo generar el código.') + '</p>';
                     }
                 } catch(e) {
                     resultDiv.innerHTML = '<p style="color:#f15c6d; margin-top:15px;">Error al comunicar con el servidor.</p>';
@@ -689,7 +694,6 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Endpoint que responde qué casillas están activas
 app.get('/status', (req, res) => {
     const slots = ['bot1', 'bot2', 'bot3', 'bot4'];
     const status = {};
@@ -706,26 +710,26 @@ app.get('/status', (req, res) => {
     res.json(status);
 });
 
+// ENDPOINT CORREGIDO CON LIMPIEZA FORZOSA
 app.post('/pair-code', async (req, res) => {
     const { botId, phone } = req.body;
     try {
         const cleanedNumber = phone.replace(/[^0-9]/g, '');
         
-        let sock = activeSockets[botId];
-        if (!sock) {
-            sock = await initBotSocket(botId);
-            await delay(4000);
+        // Cierra conexión previa y resetea credenciales corruptas o viejas
+        if (activeSockets[botId]) {
+            try { activeSockets[botId].ws.close(); } catch(e){}
+            delete activeSockets[botId];
         }
 
-        if (sock.authState?.creds?.registered) {
-            return res.status(400).json({ error: 'Esta casilla ya tiene un WhatsApp conectado.' });
-        }
+        const sock = await initBotSocket(botId, true);
+        await delay(5000); // Esperar 5s a que inicialice correctamente con WhatsApp
 
         const code = await sock.requestPairingCode(cleanedNumber);
         res.json({ code });
     } catch (err) {
         console.error('Error solicitando Pairing Code:', err);
-        res.status(500).json({ error: err.message || 'Error al solicitar código a WhatsApp.' });
+        res.status(500).json({ error: err.message || 'Error al solicitar el código a WhatsApp.' });
     }
 });
 
@@ -733,7 +737,7 @@ app.post('/start-qr', async (req, res) => {
     const { botId } = req.body;
     try {
         if (!activeSockets[botId]) {
-            await initBotSocket(botId);
+            await initBotSocket(botId, true);
         }
         res.json({ success: true });
     } catch (err) {
