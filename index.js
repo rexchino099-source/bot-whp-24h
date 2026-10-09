@@ -98,12 +98,13 @@ const currentQRs = {};
 async function initBotSocket(botId, forceReset = false) {
     const authFolder = `auth_info_${botId}`;
 
-    if (forceReset && fs.existsSync(authFolder)) {
-        console.log(`🧹 Limpiando sesión anterior de ${botId}...`);
-        try {
-            fs.rmSync(authFolder, { recursive: true, force: true });
-        } catch (e) {
-            console.log(`Error eliminando ${authFolder}:`, e);
+    if (forceReset) {
+        if (activeSockets[botId]) {
+            try { activeSockets[botId].end(undefined); } catch(e){}
+            delete activeSockets[botId];
+        }
+        if (fs.existsSync(authFolder)) {
+            try { fs.rmSync(authFolder, { recursive: true, force: true }); } catch(e){}
         }
     }
 
@@ -200,7 +201,7 @@ async function initBotSocket(botId, forceReset = false) {
     return sock;
 }
 
-// Cargar sesiones guardadas automáticamente al iniciar
+// Cargar sesiones guardadas al iniciar
 fs.readdirSync('./').forEach(file => {
     if (file.startsWith('auth_info_')) {
         const botId = file.replace('auth_info_', '');
@@ -554,7 +555,7 @@ async function atenderComandos(sock, from, msg, cmd, texto, esOwnerChat, esGrupo
 }
 
 // ==========================================
-// 🌐 PANEL WEB SLIM CON SOLICITUD SÍNCRONA
+// 🌐 PANEL WEB SLIM ULTRARRÁPIDO Y SÍNCRONO
 // ==========================================
 app.get('/', (req, res) => {
     res.send(`
@@ -634,11 +635,11 @@ app.get('/', (req, res) => {
                 const resultDiv = document.getElementById('result');
 
                 if(!phone || phone.length < 8) { 
-                    alert('Ingresa tu número con código de país. Ej: 521... o 53...'); 
+                    alert('Ingresa tu número con código de país.'); 
                     return; 
                 }
 
-                resultDiv.innerHTML = '<p style="color:#8696a0;">Iniciando conexión limpia con los servidores de WhatsApp...</p>';
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Solicitando código directamente a los servidores de WhatsApp...</p>';
 
                 try {
                     const res = await fetch('/pair-code', {
@@ -649,7 +650,7 @@ app.get('/', (req, res) => {
                     const data = await res.json();
 
                     if(data.code) {
-                        resultDiv.innerHTML = '<p style="margin-top:15px; color:#8696a0;">Ingresa este código en tu WhatsApp rápidamente:</p>' +
+                        resultDiv.innerHTML = '<p style="margin-top:15px; color:#8696a0;">Ingresa este código en tu WhatsApp:</p>' +
                                               '<div class="code-box">' + data.code + '</div>';
                     } else {
                         resultDiv.innerHTML = '<p style="color:#f15c6d; margin-top:15px;">Error: ' + (data.error || 'No se pudo generar el código.') + '</p>';
@@ -663,7 +664,7 @@ app.get('/', (req, res) => {
                 const botId = document.getElementById('botId').value;
                 const resultDiv = document.getElementById('result');
 
-                resultDiv.innerHTML = '<p style="color:#8696a0;">Cargando código QR...</p>';
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Generando código QR...</p>';
                 
                 try {
                     await fetch('/start-qr', {
@@ -681,11 +682,11 @@ app.get('/', (req, res) => {
                         if(data.qr) {
                             clearInterval(interval);
                             resultDiv.innerHTML = '<div id="qr-container"><img src="' + data.qr + '" alt="QR Code"><p style="font-size:0.8rem; color:#8696a0;">Escanea desde WhatsApp > Dispositivos vinculados</p></div>';
-                        } else if(attempts > 10) {
+                        } else if(attempts > 12) {
                             clearInterval(interval);
-                            resultDiv.innerHTML = '<p style="color:#f15c6d;">El QR tardó demasiado en generar. Reintenta.</p>';
+                            resultDiv.innerHTML = '<p style="color:#f15c6d;">El QR tardó demasiado. Haz clic en Generar Código QR de nuevo.</p>';
                         } else {
-                            resultDiv.innerHTML = '<p style="color:#8696a0;">Generando código QR... (' + attempts + '/10)</p>';
+                            resultDiv.innerHTML = '<p style="color:#8696a0;">Generando código QR en servidor... (' + attempts + '/12)</p>';
                         }
                     }, 2000);
                 } catch(e) {
@@ -714,7 +715,7 @@ app.get('/status', (req, res) => {
     res.json(status);
 });
 
-// ENDPOINT SÍNCRONO DE ALTA PRECISION
+// ENDPOINT OPTIMIZADO SIN TIMEOUTS
 app.post('/pair-code', async (req, res) => {
     const { botId, phone } = req.body;
     try {
@@ -724,39 +725,29 @@ app.post('/pair-code', async (req, res) => {
             return res.status(400).json({ error: 'Número de teléfono inválido.' });
         }
 
-        // Si ya hay un socket en esta casilla, ciérralo
-        if (activeSockets[botId]) {
-            try { activeSockets[botId].ws.close(); } catch(e){}
-            delete activeSockets[botId];
+        let sock = activeSockets[botId];
+
+        // Si el socket no existe o ya estaba registrado, reiniciarlo limpiamente
+        if (!sock || sock.authState?.creds?.registered) {
+            sock = await initBotSocket(botId, true);
+            await delay(3000); // Pequeño delay suficiente para que abra el WebSocket sin causar timeout en Render
         }
 
-        // Forzar reinicio limpio de la casilla
-        const sock = await initBotSocket(botId, true);
-
-        // Espera crítica de 6 segundos para sincronizar las llaves con la red de WhatsApp
-        await delay(6000);
-
-        if (sock.authState?.creds?.registered) {
-            return res.status(400).json({ error: 'Esta casilla ya se encuentra vinculada a un número activo.' });
-        }
-
-        // Solicitar el código oficial a WhatsApp
+        // Petición directa a los servidores oficiales de WhatsApp
         const code = await sock.requestPairingCode(cleanedNumber);
         
-        console.log(`🔑 Código real generado para ${cleanedNumber}: ${code}`);
+        console.log(`🔑 Código real emitido por WhatsApp para ${cleanedNumber}: ${code}`);
         res.json({ code });
     } catch (err) {
         console.error('Error solicitando Pairing Code:', err);
-        res.status(500).json({ error: err.message || 'Error al solicitar el código a WhatsApp.' });
+        res.status(500).json({ error: err.message || 'Error al solicitar código a WhatsApp. Reintenta.' });
     }
 });
 
 app.post('/start-qr', async (req, res) => {
     const { botId } = req.body;
     try {
-        if (!activeSockets[botId]) {
-            await initBotSocket(botId, true);
-        }
+        await initBotSocket(botId, true);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
