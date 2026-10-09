@@ -3,8 +3,7 @@ const {
     useMultiFileAuthState, 
     DisconnectReason,
     downloadContentFromMessage,
-    delay,
-    Browsers
+    delay
 } = require('@whiskeysockets/baileys');
 const express = require('express');
 const cors = require('cors');
@@ -101,7 +100,7 @@ async function initBotSocket(botId, forceReset = false) {
 
     if (forceReset) {
         if (activeSockets[botId]) {
-            try { activeSockets[botId].end(undefined); } catch(e){}
+            try { activeSockets[botId].ws.close(); } catch(e){}
             delete activeSockets[botId];
         }
         if (fs.existsSync(authFolder)) {
@@ -119,7 +118,7 @@ async function initBotSocket(botId, forceReset = false) {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'fatal' }),
-        browser: Browsers.macOS("Chrome"), // Navegador oficial aceptado por WhatsApp
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 10000
     });
@@ -556,7 +555,7 @@ async function atenderComandos(sock, from, msg, cmd, texto, esOwnerChat, esGrupo
 }
 
 // ==========================================
-// 🌐 PANEL WEB CON CORRECCIÓN DE NÚMEROS
+// 🌐 PANEL WEB SLIM CON LIMPIEZA FORZOSA
 // ==========================================
 app.get('/', (req, res) => {
     res.send(`
@@ -583,6 +582,7 @@ app.get('/', (req, res) => {
             .status-item:last-child { border-bottom: none; }
             .badge-online { color: #00a884; font-weight: bold; }
             .badge-offline { color: #f15c6d; font-weight: bold; }
+            .btn-reset { background: #202c33; color: #f15c6d; border: 1px solid #2a3942; margin-top: 10px; font-size: 0.85rem; }
         </style>
     </head>
     <body>
@@ -608,6 +608,7 @@ app.get('/', (req, res) => {
 
             <button onclick="requestPairingCode()">Obtener Código de 8 Dígitos Real</button>
             <button onclick="requestQR()" style="margin-top: 10px; background: #202c33; color: #e9edef;">Generar Código QR</button>
+            <button onclick="resetCasilla()" class="btn-reset">🧹 Resetear / Desconectar Casilla</button>
 
             <div id="result"></div>
         </div>
@@ -630,6 +631,15 @@ app.get('/', (req, res) => {
             setInterval(checkStatus, 4000);
             checkStatus();
 
+            async function resetCasilla() {
+                const botId = document.getElementById('botId').value;
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Reseteando ' + botId + '...</p>';
+                await fetch('/reset-bot/' + botId, { method: 'POST' });
+                resultDiv.innerHTML = '<p style="color:#00a884;">✅ Casilla ' + botId + ' reseteada. Ahora puedes solicitar un código nuevo.</p>';
+                checkStatus();
+            }
+
             async function requestPairingCode() {
                 const botId = document.getElementById('botId').value;
                 const phone = document.getElementById('phone').value;
@@ -640,7 +650,7 @@ app.get('/', (req, res) => {
                     return; 
                 }
 
-                resultDiv.innerHTML = '<p style="color:#8696a0;">Solicitando código directamente a los servidores de WhatsApp...</p>';
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Limpiando sesión y solicitando código directo a WhatsApp...</p>';
 
                 try {
                     const res = await fetch('/pair-code', {
@@ -716,7 +726,13 @@ app.get('/status', (req, res) => {
     res.json(status);
 });
 
-// ENDPOINT CON FORMATEO AUTOMÁTICO DE NÚMEROS DE MÉXICO
+app.post('/reset-bot/:botId', async (req, res) => {
+    const { botId } = req.params;
+    await initBotSocket(botId, true);
+    res.json({ success: true });
+});
+
+// ENDPOINT CON LIMPIEZA FORZOSA GARANTIZADA
 app.post('/pair-code', async (req, res) => {
     const { botId, phone } = req.body;
     try {
@@ -726,21 +742,17 @@ app.post('/pair-code', async (req, res) => {
             return res.status(400).json({ error: 'Número de teléfono inválido.' });
         }
 
-        // Si es número de México y le faltó el '1', agregarlo automáticamente (52 -> 521)
         if (cleanedNumber.startsWith('52') && !cleanedNumber.startsWith('521') && cleanedNumber.length === 12) {
             cleanedNumber = '521' + cleanedNumber.slice(2);
         }
 
-        let sock = activeSockets[botId];
-
-        if (!sock || sock.authState?.creds?.registered) {
-            sock = await initBotSocket(botId, true);
-            await delay(3000);
-        }
+        // Forzar la recreación limpia del socket sin datos cacheados
+        const sock = await initBotSocket(botId, true);
+        await delay(3000);
 
         const code = await sock.requestPairingCode(cleanedNumber);
         
-        console.log(`🔑 Código oficial de WhatsApp emitido para ${cleanedNumber}: ${code}`);
+        console.log(`🔑 Código oficial emitido para ${cleanedNumber}: ${code}`);
         res.json({ code });
     } catch (err) {
         console.error('Error solicitando Pairing Code:', err);
