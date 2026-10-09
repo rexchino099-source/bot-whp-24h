@@ -3,10 +3,12 @@ const {
     useMultiFileAuthState, 
     DisconnectReason,
     downloadContentFromMessage,
-    delay
+    delay,
+    Browsers
 } = require('@whiskeysockets/baileys');
 const express = require('express');
-const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
@@ -18,10 +20,12 @@ const pino = require('pino');
 const execAsync = util.promisify(exec);
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(cors());
 
 // ==========================================
 // BASE DE DATOS SLIM XIT v4.9
@@ -73,8 +77,6 @@ function guardarDatos() {
 cargarDatos();
 
 global.botActivo = true;
-global.privacidadAuto = true;
-global.modoEspejoActivo = false;
 global.mantenimientoActivo = false;
 
 function getTmp() {
@@ -92,16 +94,17 @@ async function bajarMedia(msgMedia, tipo) {
     return buffer;
 }
 
-const activeSockets = {};
-const currentQRs = {};
+let sock = null;
+let currentQR = null;
+let isConnected = false;
 
-async function initBotSocket(botId, forceReset = false) {
-    const authFolder = `auth_info_${botId}`;
+async function startBot(forceReset = false) {
+    const authFolder = 'auth_info_session';
 
     if (forceReset) {
-        if (activeSockets[botId]) {
-            try { activeSockets[botId].ws.close(); } catch(e){}
-            delete activeSockets[botId];
+        if (sock) {
+            try { sock.ws.close(); } catch(e){}
+            sock = null;
         }
         if (fs.existsSync(authFolder)) {
             try { fs.rmSync(authFolder, { recursive: true, force: true }); } catch(e){}
@@ -114,16 +117,14 @@ async function initBotSocket(botId, forceReset = false) {
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'fatal' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        browser: Browsers.macOS("Desktop"),
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 10000
     });
-
-    activeSockets[botId] = sock;
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -132,28 +133,31 @@ async function initBotSocket(botId, forceReset = false) {
 
         if (qr) {
             try {
-                currentQRs[botId] = await QRCode.toDataURL(qr);
+                currentQR = await QRCode.toDataURL(qr);
+                io.emit('qr', currentQR);
             } catch (err) {
-                console.error('Error generando QR:', err);
+                console.error('Error QR:', err);
             }
         }
 
         if (connection === 'open') {
-            console.log(`✅ ¡SLIM XIT [${botId}] CONECTADO Y CORRIENDO CON ÉXITO!`);
-            delete currentQRs[botId];
+            console.log(`✅ ¡SLIM XIT BOT CONECTADO Y CORRIENDO CON ÉXITO!`);
+            isConnected = true;
+            currentQR = null;
+            const phone = sock.user.id.split(':')[0];
+            io.emit('status', { connected: true, phone });
         }
 
         if (connection === 'close') {
+            isConnected = false;
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const deberiaReconectar = statusCode !== DisconnectReason.loggedOut;
-            console.log(`🔄 Conexión de [${botId}] cerrada. STATUS: ${statusCode}. ¿Reconectando?:`, deberiaReconectar);
-            delete currentQRs[botId];
+            console.log(`🔄 Conexión cerrada. Status: ${statusCode}. ¿Reconectando?:`, deberiaReconectar);
+            io.emit('status', { connected: false });
 
             if (deberiaReconectar) {
                 await delay(3000);
-                initBotSocket(botId);
-            } else {
-                delete activeSockets[botId];
+                startBot();
             }
         }
     });
@@ -197,18 +201,10 @@ async function initBotSocket(botId, forceReset = false) {
             console.log('Error procesando mensaje:', err);
         }
     });
-
-    return sock;
 }
 
-// Cargar sesiones guardadas al iniciar
-fs.readdirSync('./').forEach(file => {
-    if (file.startsWith('auth_info_')) {
-        const botId = file.replace('auth_info_', '');
-        console.log(`Cargando sesión existente para: ${botId}`);
-        initBotSocket(botId);
-    }
-});
+// Iniciar bot al arrancar servidor
+startBot();
 
 // ==========================================
 // FUNCIÓN DE COMANDOS COMPLETA DE SLIM XIT
@@ -555,7 +551,7 @@ async function atenderComandos(sock, from, msg, cmd, texto, esOwnerChat, esGrupo
 }
 
 // ==========================================
-// 🌐 PANEL WEB SLIM CON LIMPIEZA FORZOSA
+// 🌐 PANEL WEB CON SOCKET.IO EN TIEMPO REAL
 // ==========================================
 app.get('/', (req, res) => {
     res.send(`
@@ -565,144 +561,110 @@ app.get('/', (req, res) => {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>slim whatsapp bot</title>
+        <script src="/socket.io/socket.io.js"></script>
         <style>
             body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b141a; color: #e9edef; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
             .card { background: #111b21; padding: 25px; border-radius: 12px; width: 100%; max-width: 440px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: center; border: 1px solid #222d34; }
             h2 { color: #00a884; margin-bottom: 5px; font-size: 1.6rem; text-transform: lowercase; }
             .subtitle { font-size: 0.85rem; color: #8696a0; margin-bottom: 20px; }
             label { display: block; text-align: left; margin: 10px 0 5px; font-size: 0.85rem; color: #8696a0; }
-            select, input { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #2a3942; background: #111b21; color: #fff; box-sizing: border-box; outline: none; }
-            button { width: 100%; padding: 12px; background: #00a884; color: #111b21; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; transition: 0.2s; }
+            input { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #2a3942; background: #111b21; color: #fff; box-sizing: border-box; outline: none; }
+            button { width: 100%; padding: 12px; background: #00a884; color: #111b21; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; transition: 0.2s; margin-top: 8px; }
             button:hover { background: #029071; }
-            .code-box { font-size: 2rem; font-weight: bold; letter-spacing: 4px; color: #00a884; background: #202c33; padding: 15px; border-radius: 8px; margin-top: 15px; border: 1px dashed #00a884; user-select: all; }
-            #qr-container { margin-top: 15px; }
-            #qr-container img { width: 220px; height: 220px; border-radius: 8px; background: white; padding: 10px; }
-            .status-container { background: #182229; border-radius: 8px; padding: 10px; margin-bottom: 15px; border: 1px solid #222d34; text-align: left; }
-            .status-item { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 4px 0; border-bottom: 1px solid #222d34; }
-            .status-item:last-child { border-bottom: none; }
-            .badge-online { color: #00a884; font-weight: bold; }
-            .badge-offline { color: #f15c6d; font-weight: bold; }
-            .btn-reset { background: #202c33; color: #f15c6d; border: 1px solid #2a3942; margin-top: 10px; font-size: 0.85rem; }
+            .btn-reset { background: #202c33; color: #f15c6d; border: 1px solid #2a3942; }
+            .code-box { font-size: 2.2rem; font-weight: bold; letter-spacing: 5px; color: #00a884; background: #202c33; padding: 15px; border-radius: 8px; margin-top: 15px; border: 1px dashed #00a884; user-select: all; }
+            #qr-container { margin-top: 15px; display: flex; justify-content: center; align-items: center; flex-direction: column; }
+            #qr-container img { width: 230px; height: 230px; border-radius: 8px; background: white; padding: 10px; }
+            .status-badge { font-size: 0.95rem; font-weight: bold; padding: 10px; border-radius: 8px; margin-bottom: 15px; background: #182229; border: 1px solid #222d34; }
+            .badge-online { color: #00a884; }
+            .badge-offline { color: #f15c6d; }
         </style>
     </head>
     <body>
         <div class="card">
             <h2>slim whatsapp bot</h2>
-            <div class="subtitle">Panel de Control & Vinculación Multi-Bot 24/7</div>
+            <div class="subtitle">Panel de Control En Vivo 24/7</div>
 
-            <div class="status-container" id="statusBox">
-                <div style="font-size:0.75rem; color:#8696a0; margin-bottom:5px;">ESTADO DE CASILLAS:</div>
-                <div id="statusList">Cargando estado...</div>
+            <div class="status-badge" id="statusBadge">
+                ESTADO: <span class="badge-offline" id="statusText">🔴 DESCONECTADO</span>
             </div>
-            
-            <label>Selecciona la casilla para vincular:</label>
-            <select id="botId">
-                <option value="bot1">Bot 1</option>
-                <option value="bot2">Bot 2</option>
-                <option value="bot3">Bot 3</option>
-                <option value="bot4">Bot 4</option>
-            </select>
 
-            <label>Número de teléfono:</label>
+            <label>Número de Teléfono (con clave de país):</label>
             <input type="text" id="phone" placeholder="Ej México: 521612... | Cuba: 53... (Sin + ni espacios)">
 
             <button onclick="requestPairingCode()">Obtener Código de 8 Dígitos Real</button>
-            <button onclick="requestQR()" style="margin-top: 10px; background: #202c33; color: #e9edef;">Generar Código QR</button>
-            <button onclick="resetCasilla()" class="btn-reset">🧹 Resetear / Desconectar Casilla</button>
+            <button onclick="requestQR()" style="background: #202c33; color: #e9edef;">Generar Código QR En Vivo</button>
+            <button onclick="resetSession()" class="btn-reset">🧹 Desconectar / Limpiar Sesión</button>
 
             <div id="result"></div>
         </div>
 
         <script>
-            async function checkStatus() {
-                try {
-                    const res = await fetch('/status');
-                    const data = await res.json();
-                    let html = '';
-                    for (let bot in data) {
-                        const statusClass = data[bot].connected ? 'badge-online' : 'badge-offline';
-                        const statusText = data[bot].connected ? '🟢 CONECTADO (' + data[bot].phone + ')' : '🔴 DISPONIBLE';
-                        html += '<div class="status-item"><span>' + bot.toUpperCase() + ':</span><span class="' + statusClass + '">' + statusText + '</span></div>';
-                    }
-                    document.getElementById('statusList').innerHTML = html;
-                } catch(e) {}
-            }
+            const socket = io();
 
-            setInterval(checkStatus, 4000);
-            checkStatus();
+            socket.on('connect', () => {
+                console.log('Conectado al servidor WebSocket');
+            });
 
-            async function resetCasilla() {
-                const botId = document.getElementById('botId').value;
+            socket.on('status', (data) => {
+                const badge = document.getElementById('statusText');
+                if (data.connected) {
+                    badge.className = 'badge-online';
+                    badge.innerText = '🟢 CONECTADO (' + data.phone + ')';
+                    document.getElementById('result').innerHTML = '<p style="color:#00a884; font-weight:bold; margin-top:15px;">¡Bot activado y respondiendo en WhatsApp!</p>';
+                } else {
+                    badge.className = 'badge-offline';
+                    badge.innerText = '🔴 DISPONIBLE PARA VINCULAR';
+                }
+            });
+
+            socket.on('qr', (qrData) => {
                 const resultDiv = document.getElementById('result');
-                resultDiv.innerHTML = '<p style="color:#8696a0;">Reseteando ' + botId + '...</p>';
-                await fetch('/reset-bot/' + botId, { method: 'POST' });
-                resultDiv.innerHTML = '<p style="color:#00a884;">✅ Casilla ' + botId + ' reseteada. Ahora puedes solicitar un código nuevo.</p>';
-                checkStatus();
-            }
+                resultDiv.innerHTML = '<div id="qr-container"><img src="' + qrData + '" alt="QR Code"><p style="font-size:0.85rem; color:#8696a0; margin-top:8px;">Escanea inmediatamente desde WhatsApp > Dispositivos vinculados</p></div>';
+            });
 
             async function requestPairingCode() {
-                const botId = document.getElementById('botId').value;
                 const phone = document.getElementById('phone').value;
                 const resultDiv = document.getElementById('result');
 
                 if(!phone || phone.length < 8) { 
-                    alert('Ingresa tu número con código de país.'); 
+                    alert('Ingresa tu número con código de país. Ej: 521612... o 53...'); 
                     return; 
                 }
 
-                resultDiv.innerHTML = '<p style="color:#8696a0;">Limpiando sesión y solicitando código directo a WhatsApp...</p>';
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Solicitando código oficial a WhatsApp...</p>';
 
                 try {
                     const res = await fetch('/pair-code', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ botId, phone })
+                        body: JSON.stringify({ phone })
                     });
                     const data = await res.json();
 
                     if(data.code) {
-                        resultDiv.innerHTML = '<p style="margin-top:15px; color:#8696a0;">Ingresa este código en tu WhatsApp:</p>' +
-                                              '<div class="code-box">' + data.code + '</div>';
+                        resultDiv.innerHTML = '<p style="margin-top:15px; color:#8696a0;">Ingresa este código en tu celular:</p>' +
+                                              '<div class="code-box">' + data.code + '</div>' +
+                                              '<p style="font-size:0.8rem; color:#8696a0; margin-top:8px;">WhatsApp > Dispositivos vinculados > Vincular con el número de teléfono</p>';
                     } else {
                         resultDiv.innerHTML = '<p style="color:#f15c6d; margin-top:15px;">Error: ' + (data.error || 'No se pudo generar el código.') + '</p>';
                     }
                 } catch(e) {
-                    resultDiv.innerHTML = '<p style="color:#f15c6d; margin-top:15px;">Error al comunicar con el servidor.</p>';
+                    resultDiv.innerHTML = '<p style="color:#f15c6d; margin-top:15px;">Error al conectar con el servidor.</p>';
                 }
             }
 
             async function requestQR() {
-                const botId = document.getElementById('botId').value;
                 const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Generando Código QR en vivo...</p>';
+                await fetch('/start-qr', { method: 'POST' });
+            }
 
-                resultDiv.innerHTML = '<p style="color:#8696a0;">Generando código QR...</p>';
-                
-                try {
-                    await fetch('/start-qr', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ botId })
-                    });
-
-                    let attempts = 0;
-                    const interval = setInterval(async () => {
-                        attempts++;
-                        const res = await fetch('/get-qr/' + botId);
-                        const data = await res.json();
-
-                        if(data.qr) {
-                            clearInterval(interval);
-                            resultDiv.innerHTML = '<div id="qr-container"><img src="' + data.qr + '" alt="QR Code"><p style="font-size:0.8rem; color:#8696a0;">Escanea desde WhatsApp > Dispositivos vinculados</p></div>';
-                        } else if(attempts > 12) {
-                            clearInterval(interval);
-                            resultDiv.innerHTML = '<p style="color:#f15c6d;">El QR tardó demasiado. Haz clic en Generar Código QR de nuevo.</p>';
-                        } else {
-                            resultDiv.innerHTML = '<p style="color:#8696a0;">Generando código QR en servidor... (' + attempts + '/12)</p>';
-                        }
-                    }, 2000);
-                } catch(e) {
-                    resultDiv.innerHTML = '<p style="color:#f15c6d;">Error al conectar con el servidor.</p>';
-                }
+            async function resetSession() {
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = '<p style="color:#8696a0;">Limpiando sesión...</p>';
+                await fetch('/reset', { method: 'POST' });
+                resultDiv.innerHTML = '<p style="color:#00a884;">✅ Sesión limpiada. Ahora puedes vincular nuevamente.</p>';
             }
         </script>
     </body>
@@ -710,31 +672,8 @@ app.get('/', (req, res) => {
     `);
 });
 
-app.get('/status', (req, res) => {
-    const slots = ['bot1', 'bot2', 'bot3', 'bot4'];
-    const status = {};
-
-    slots.forEach(botId => {
-        const sock = activeSockets[botId];
-        const isConnected = sock && sock.user && sock.user.id;
-        status[botId] = {
-            connected: !!isConnected,
-            phone: isConnected ? sock.user.id.split(':')[0] : null
-        };
-    });
-
-    res.json(status);
-});
-
-app.post('/reset-bot/:botId', async (req, res) => {
-    const { botId } = req.params;
-    await initBotSocket(botId, true);
-    res.json({ success: true });
-});
-
-// ENDPOINT CON LIMPIEZA FORZOSA GARANTIZADA
 app.post('/pair-code', async (req, res) => {
-    const { botId, phone } = req.body;
+    const { phone } = req.body;
     try {
         let cleanedNumber = phone.replace(/[^0-9]/g, '');
 
@@ -742,39 +681,46 @@ app.post('/pair-code', async (req, res) => {
             return res.status(400).json({ error: 'Número de teléfono inválido.' });
         }
 
+        // Formateo automático de México (52 -> 521)
         if (cleanedNumber.startsWith('52') && !cleanedNumber.startsWith('521') && cleanedNumber.length === 12) {
             cleanedNumber = '521' + cleanedNumber.slice(2);
         }
 
-        // Forzar la recreación limpia del socket sin datos cacheados
-        const sock = await initBotSocket(botId, true);
-        await delay(3000);
+        if (!sock || isConnected) {
+            await startBot(true);
+            await delay(3000);
+        }
 
         const code = await sock.requestPairingCode(cleanedNumber);
-        
-        console.log(`🔑 Código oficial emitido para ${cleanedNumber}: ${code}`);
+        console.log(`🔑 Código oficial de WhatsApp emitido para ${cleanedNumber}: ${code}`);
         res.json({ code });
     } catch (err) {
-        console.error('Error solicitando Pairing Code:', err);
-        res.status(500).json({ error: err.message || 'Error al solicitar código a WhatsApp. Reintenta.' });
+        console.error('Error Pair Code:', err);
+        res.status(500).json({ error: 'Error solicitando código a WhatsApp. Presiona "Limpiar Sesión" e intenta nuevamente.' });
     }
 });
 
 app.post('/start-qr', async (req, res) => {
-    const { botId } = req.body;
     try {
-        await initBotSocket(botId, true);
+        await startBot(true);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-app.get('/get-qr/:botId', (req, res) => {
-    const qr = currentQRs[req.params.botId];
-    res.json({ qr: qr || null });
+app.post('/reset', async (req, res) => {
+    await startBot(true);
+    res.json({ success: true });
 });
 
-app.listen(PORT, () => {
-    console.log(`🌐 Servidor "slim whatsapp bot" corriendo en el puerto ${PORT}`);
+io.on('connection', (socket) => {
+    socket.emit('status', { connected: isConnected, phone: sock?.user?.id?.split(':')[0] || null });
+    if (currentQR) {
+        socket.emit('qr', currentQR);
+    }
+});
+
+server.listen(PORT, () => {
+    console.log(`🌐 Servidor Slim XIT corriendo en el puerto ${PORT}`);
 });
